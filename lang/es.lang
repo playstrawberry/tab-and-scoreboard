@@ -1,0 +1,26 @@
+default.header=&f¡Te damos la bienvenida, &e{player}&f!
+default.footer=&7En línea: &f{online}/{max_players}  &7Ping: &f{ping} ms
+default.title=&e&l{player}
+default.line.rank=&7Rango: &f{group}
+default.line.world=&7Mundo: &f{world}
+default.line.online=&7En línea: &f{online}
+default.line.ping=&7Ping: &f{ping} ms
+status=Tab and Scoreboard {0}: {1} jugadores en línea, {2} diseños, rangos de perms-lite.
+status.no_perms=Tab and Scoreboard {0}: {1} jugadores en línea, {2} diseños. perms-lite no responde, así que cada jugador está en el grupo default.
+reloaded=Ajustes recargados: {0} diseños.
+kept=Los ajustes en uso se mantienen como estaban.
+usage=Usa /tab o /tab reload.
+err.read=No se pudo leer el archivo de ajustes {0}.
+err.too_big=El archivo de ajustes supera los {0} KiB.
+err.syntax=Línea {0}: se esperaba [sección] o clave = valor.
+err.unknown=Línea {0}: nombre desconocido {1}.
+err.duplicate=Línea {0}: {1} aparece dos veces.
+err.value=Línea {0}: el valor de {1} no se puede usar aquí.
+err.limit=Línea {0}: {1} admite como máximo {2}.
+err.font=Línea {0}: la fuente {1} pertenece a la plataforma. Usa tu propio espacio de nombres.
+err.icon=Línea {0}: no existe [icon {1}].
+err.lang=Archivo de idioma {0}, línea {1}: se esperaba clave=texto.
+sidebar.on=Tu sidebar ahora está activada.
+sidebar.off=Tu sidebar ahora está desactivada.
+sidebar.state=Tu sidebar: {0}.
+sidebar.usage=Usa /{0} {1} o /{0} {2}.

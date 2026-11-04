@@ -1,0 +1,26 @@
+default.header=&fWelcome, &e{player}&f!
+default.footer=&7Online: &f{online}/{max_players}  &7Ping: &f{ping} ms
+default.title=&e&l{player}
+default.line.rank=&7Rank: &f{group}
+default.line.world=&7World: &f{world}
+default.line.online=&7Online: &f{online}
+default.line.ping=&7Ping: &f{ping} ms
+status=Tab and Scoreboard {0}: {1} players online, {2} layouts, ranks from perms-lite.
+status.no_perms=Tab and Scoreboard {0}: {1} players online, {2} layouts. perms-lite does not answer, so every player is in the group default.
+reloaded=Settings reloaded: {0} layouts.
+kept=The settings in use stay as they were.
+usage=Use /tab or /tab reload.
+err.read=Could not read the settings file {0}.
+err.too_big=The settings file is larger than {0} KiB.
+err.syntax=Line {0}: expected [section] or key = value.
+err.unknown=Line {0}: unknown name {1}.
+err.duplicate=Line {0}: {1} is given twice.
+err.value=Line {0}: {1} has a value that cannot be used here.
+err.limit=Line {0}: {1} allows at most {2}.
+err.font=Line {0}: the font {1} belongs to the platform. Use your own namespace.
+err.icon=Line {0}: there is no [icon {1}].
+err.lang=Language file {0}, line {1}: expected key=text.
+sidebar.on=Your sidebar is now on.
+sidebar.off=Your sidebar is now off.
+sidebar.state=Your sidebar is {0}.
+sidebar.usage=Use /{0} {1} or /{0} {2}.

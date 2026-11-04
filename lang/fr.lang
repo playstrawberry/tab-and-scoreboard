@@ -1,0 +1,26 @@
+default.header=&fBienvenue, &e{player}&f !
+default.footer=&7En ligne : &f{online}/{max_players}  &7Ping : &f{ping} ms
+default.title=&e&l{player}
+default.line.rank=&7Grade : &f{group}
+default.line.world=&7Monde : &f{world}
+default.line.online=&7En ligne : &f{online}
+default.line.ping=&7Ping : &f{ping} ms
+status=Tab and Scoreboard {0} : {1} joueurs en ligne, {2} mises en page, grades fournis par perms-lite.
+status.no_perms=Tab and Scoreboard {0} : {1} joueurs en ligne, {2} mises en page. perms-lite ne répond pas, donc chaque joueur est dans le groupe default.
+reloaded=Réglages rechargés : {0} mises en page.
+kept=Les réglages en cours restent inchangés.
+usage=Utilisez /tab ou /tab reload.
+err.read=Impossible de lire le fichier de réglages {0}.
+err.too_big=Le fichier de réglages dépasse {0} Kio.
+err.syntax=Ligne {0} : [section] ou clé = valeur attendu.
+err.unknown=Ligne {0} : nom inconnu {1}.
+err.duplicate=Ligne {0} : {1} est indiqué deux fois.
+err.value=Ligne {0} : la valeur de {1} n'est pas utilisable ici.
+err.limit=Ligne {0} : {1} accepte au plus {2}.
+err.font=Ligne {0} : la police {1} appartient à la plateforme. Utilisez votre propre espace de noms.
+err.icon=Ligne {0} : il n'existe pas de [icon {1}].
+err.lang=Fichier de langue {0}, ligne {1} : clé=texte attendu.
+sidebar.on=Votre sidebar est maintenant activée.
+sidebar.off=Votre sidebar est maintenant désactivée.
+sidebar.state=Votre sidebar : {0}.
+sidebar.usage=Utilisez /{0} {1} ou /{0} {2}.

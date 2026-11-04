@@ -1,0 +1,26 @@
+default.header=&fHoş geldin, &e{player}&f!
+default.footer=&7Çevrimiçi: &f{online}/{max_players}  &7Ping: &f{ping} ms
+default.title=&e&l{player}
+default.line.rank=&7Rütbe: &f{group}
+default.line.world=&7Dünya: &f{world}
+default.line.online=&7Çevrimiçi: &f{online}
+default.line.ping=&7Ping: &f{ping} ms
+status=Tab and Scoreboard {0}: {1} oyuncu çevrimiçi, {2} düzen, rütbeler perms-lite'tan.
+status.no_perms=Tab and Scoreboard {0}: {1} oyuncu çevrimiçi, {2} düzen. perms-lite yanıt vermiyor, bu yüzden her oyuncu default grubunda.
+reloaded=Ayarlar yeniden yüklendi: {0} düzen.
+kept=Kullanılan ayarlar olduğu gibi kalıyor.
+usage=Kullanım: /tab veya /tab reload.
+err.read=Ayar dosyası {0} okunamadı.
+err.too_big=Ayar dosyası {0} KiB'tan büyük.
+err.syntax=Satır {0}: [bölüm] veya anahtar = değer bekleniyordu.
+err.unknown=Satır {0}: bilinmeyen ad {1}.
+err.duplicate=Satır {0}: {1} iki kez verilmiş.
+err.value=Satır {0}: {1} için verilen değer burada kullanılamaz.
+err.limit=Satır {0}: {1} en fazla {2} alabilir.
+err.font=Satır {0}: {1} yazı tipi platforma ait. Kendi ad alanını kullan.
+err.icon=Satır {0}: [icon {1}] yok.
+err.lang=Dil dosyası {0}, satır {1}: anahtar=metin bekleniyordu.
+sidebar.on=Sidebar'ın artık açık.
+sidebar.off=Sidebar'ın artık kapalı.
+sidebar.state=Sidebar'ın: {0}.
+sidebar.usage=Kullanım: /{0} {1} veya /{0} {2}.

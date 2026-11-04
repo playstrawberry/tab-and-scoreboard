@@ -1,0 +1,17 @@
+[package]
+name = "tab-and-scoreboard"
+version = "0.3.0"
+edition = "2024"
+description = "Tab and Scoreboard: tab list, nametags and sidebar with ranks, images and built-in placeholders."
+authors = ["Strawberry Interactive LLC"]
+license = "LicenseRef-All-Rights-Reserved"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+strawberry-plugin-api = { path = "../strawberry-plugin-api" }
+
+# A repository of its own, not a member of a larger workspace.
+[workspace]
