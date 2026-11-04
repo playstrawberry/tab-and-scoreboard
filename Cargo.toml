@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2024"
 description = "Tab and Scoreboard: tab list, nametags and sidebar with ranks, images and built-in placeholders."
 authors = ["Strawberry Interactive LLC"]
-license = "LicenseRef-All-Rights-Reserved"
+license = "LicenseRef-Strawberry-Source-Available-1.0"
 publish = false
 
 [lib]
