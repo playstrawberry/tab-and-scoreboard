@@ -2,7 +2,7 @@
 //! images and head images. Which image a viewer gets is decided here, without the host:
 //!
 //! - a glyph needs a font from the server's own resource pack, so it is sent only when the
-//!   server owner set `icons = pack-required` (the server lets no Java player in who did not
+//!   server owner set `icons = pack-required` (the engine lets no Java player in who did not
 //!   load a required pack); otherwise its fallback text is sent;
 //! - a head needs no pack (26.3 object text); older clients see its name as text;
 //! - a Bedrock viewer gets fallback text for every image ([`Policy::TextOnly`]).
@@ -128,6 +128,12 @@ fn add(out: &mut Rendered, template: &Template, source: &dyn Source, cx: Context
             Filled::Literal(text) => {
                 if !text.is_empty() {
                     out.0.push(Segment::Literal(text));
+                }
+            }
+            Filled::Glyphs { font, text } => {
+                // pushed pictures need the server's pack: drawn only where it is required
+                if matches!(cx.policy, Policy::Java(IconsMode::PackRequired)) && !text.is_empty() {
+                    out.0.push(Segment::Glyph { text, font });
                 }
             }
             Filled::Head => {
@@ -761,5 +767,25 @@ mod tests {
             cx(&config, "", java(&config)),
         );
         assert_eq!(r, Rendered(vec![Segment::Text("&6[VIP]".into())]));
+        // A plugin's pushed glyphs (a map) need the pack: nothing without it, the glyphs with it.
+        let map = One(Provided::Glyphs {
+            font: "minimap:map".into(),
+            text: "\u{E120}".into(),
+        });
+        assert!(render(&t("{x:y}"), &map, cx(&config, "", java(&config))).is_empty());
+        let pack = self::config("pack-required");
+        let r = render(&t("{x:y}"), &map, cx(&pack, "", java(&pack)));
+        assert_eq!(
+            r,
+            Rendered(vec![Segment::Glyph {
+                text: "\u{E120}".into(),
+                font: "minimap:map".into()
+            }])
+        );
+        let bedrock = Context {
+            policy: Policy::TextOnly,
+            ..cx(&pack, "", java(&pack))
+        };
+        assert!(render(&t("{x:y}"), &map, bedrock).is_empty());
     }
 }

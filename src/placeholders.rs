@@ -257,6 +257,10 @@ impl Template {
                     Some(Provided::Icon(id)) => {
                         out.push(Filled::Icon(IconRef::Named(id.clone())));
                     }
+                    Some(Provided::Glyphs { font, text }) => out.push(Filled::Glyphs {
+                        font: font.clone(),
+                        text: text.clone(),
+                    }),
                     None => push_text(&mut out, source.missing()),
                 },
             }
@@ -287,6 +291,11 @@ pub enum Filled {
     /// Text shown as it is.
     Literal(String),
     Icon(IconRef),
+    /// Characters of a pushed font.
+    Glyphs {
+        font: String,
+        text: String,
+    },
     Head,
 }
 
@@ -357,6 +366,9 @@ pub enum Provided {
     Text(String),
     /// A named image.
     Icon(String),
+    /// Characters of a font of the server's own resource pack (a picture made of glyphs, such as
+    /// a map), drawn only where the owner says the pack is required.
+    Glyphs { font: String, text: String },
 }
 
 /// The longest pushed value, in characters.
@@ -550,7 +562,7 @@ impl KeyLimit {
     }
 }
 
-/// TPS with one decimal, at most 20.0, never negative.
+/// TPS as Paper's `/tps` writes it: one decimal, at most 20.0, never negative.
 #[must_use]
 pub fn format_tps(tps: f64) -> String {
     let tps = if tps.is_finite() {
@@ -586,6 +598,7 @@ mod tests {
                 Filled::Icon(IconRef::Own) => "<icon>".into(),
                 Filled::Icon(IconRef::Named(id)) => format!("<{id}>"),
                 Filled::Head => "<head>".into(),
+                Filled::Glyphs { font, .. } => format!("<{font}>"),
             })
             .collect()
     }
@@ -636,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn tps_is_written_with_one_decimal() {
+    fn tps_is_written_like_paper() {
         assert_eq!(format_tps(20.0), "20.0");
         assert_eq!(format_tps(21.3), "20.0");
         assert_eq!(format_tps(19.94), "19.9");

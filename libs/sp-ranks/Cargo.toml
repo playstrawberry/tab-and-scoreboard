@@ -1,0 +1,14 @@
+[package]
+name = "sp-ranks"
+version = "0.1.0"
+edition = "2024"
+description = "Strawberry library: the one reader of a player's rank (group, weight, prefix, suffix) from perms-lite, contract ranks/1 over ipc."
+authors = ["Strawberry Interactive LLC"]
+license = "LicenseRef-Strawberry-Source-Available-1.0"
+publish = false
+
+[dependencies]
+strawberry-plugin-api = { version = "=0.2.2", registry = "strawberry" }
+
+[lints]
+workspace = true

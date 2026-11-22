@@ -9,7 +9,7 @@
 //! How things are shown:
 //!
 //! - **Tab list name** (`tab-name`): one name per player, the same for every viewer
-//!   (`player.set-tab-list-name`). The server still puts the platform badges in front of it for
+//!   (`player.set-tab-list-name`). The engine still puts the platform badges in front of it for
 //!   the viewers whose client draws them.
 //! - **Order** (`sort`, `name-order`): the group weight as the tab-list order (26.3 sorts higher
 //!   first) and in the team name (older clients sort by team name).
@@ -20,7 +20,7 @@
 //! - **Header, footer, sidebar**: per viewer, from the first layout that fits the viewer's
 //!   world and group, in the viewer's language.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use strawberry_plugin_api::common::NamedColor;
@@ -238,6 +238,16 @@ pub struct Planner {
     store: Store,
     pending: Vec<Action>,
     team_overflow: bool,
+    /// (viewer, subject) by UUID: another plugin hides the subject from the viewer. The engine
+    /// sends that viewer no tab-list entry of the subject; this plugin sends it no team entry or
+    /// score of the subject either, and counts the subject out of the viewer's `{online}`.
+    hidden: BTreeSet<(String, String)>,
+    /// Pairs whose visibility changed since the last plan, in order: (viewer, subject, hidden).
+    sight_changes: Vec<(String, String, bool)>,
+    /// (viewer, team): a team this viewer's board does not hold, because every member of it is
+    /// hidden from the viewer. The team's name and look would tell him that somebody with that
+    /// look is online. At most one entry per viewer and look.
+    withheld: BTreeSet<(String, String)>,
 }
 
 struct Values<'a> {
@@ -317,6 +327,16 @@ pub fn list_order(config: &Config, rank: &Rank, name: &str) -> i32 {
     i32::try_from((weight << NAME_BITS) + (top - i64::from(code))).unwrap_or(i32::MAX)
 }
 
+/// The second halves of the pairs of `set` that start with `first`.
+fn seconds_of<'a>(
+    set: &'a BTreeSet<(String, String)>,
+    first: &'a str,
+) -> impl Iterator<Item = &'a str> {
+    set.range((first.to_owned(), String::new())..)
+        .take_while(move |(f, _)| f == first)
+        .map(|(_, second)| second.as_str())
+}
+
 /// The team of a look: higher weights sort first by name, then the look.
 fn team_name(weight: i32, hash: u32) -> String {
     let order = 9999 - weight.clamp(0, 9999);
@@ -376,7 +396,261 @@ impl Planner {
             store: Store::default(),
             pending: Vec::new(),
             team_overflow: false,
+            hidden: BTreeSet::new(),
+            sight_changes: Vec::new(),
+            withheld: BTreeSet::new(),
         }
+    }
+
+    /// Another plugin hides `subject` from `viewer` (`hidden`), or no longer does. Both must be
+    /// online in the planner; a player never hides himself.
+    pub fn set_hidden(&mut self, viewer: &str, subject: &str, hidden: bool) {
+        if viewer == subject
+            || !self.seats.contains_key(viewer)
+            || !self.seats.contains_key(subject)
+        {
+            return;
+        }
+        let pair = (viewer.to_owned(), subject.to_owned());
+        let changed = if hidden {
+            self.hidden.insert(pair)
+        } else {
+            self.hidden.remove(&pair)
+        };
+        if !changed {
+            return;
+        }
+        let seat = self.seats.get_mut(viewer).expect("checked above");
+        seat.dirty = seat.dirty.with(Key::Online);
+        self.touched = true;
+        self.sight_changes
+            .push((viewer.to_owned(), subject.to_owned(), hidden));
+    }
+
+    /// The pairs hidden now, (viewer, subject).
+    pub fn hidden_pairs(&self) -> impl Iterator<Item = &(String, String)> {
+        self.hidden.iter()
+    }
+
+    /// How many players are hidden from `viewer`.
+    fn hidden_from(hidden: &BTreeSet<(String, String)>, viewer: &str) -> usize {
+        hidden
+            .range((viewer.to_owned(), String::new())..)
+            .take_while(|(v, _)| v == viewer)
+            .count()
+    }
+
+    /// Whether both were already set up, so the viewer's board holds what it was sent of the
+    /// subject. A pair with a new player gets its entries through the plan and the filter.
+    fn settled(&self, viewer: &str, subject: &str) -> bool {
+        matches!(
+            (self.seats.get(viewer), self.seats.get(subject)),
+            (Some(v), Some(s)) if !v.new && !s.new && v.facts.edition == Edition::Java
+        )
+    }
+
+    /// Whether `viewer`'s board holds the team entry and scores of `subject`, as the last plan
+    /// left it: a hide that no plan has seen yet took nothing back, and a show that no plan has
+    /// seen yet sent nothing.
+    fn holds(&self, viewer: &str, subject: &str) -> bool {
+        let first_change = self
+            .sight_changes
+            .iter()
+            .find(|(v, s, _)| v == viewer && s == subject);
+        match first_change {
+            // The first change since that plan is a hide: he was visible then.
+            Some((_, _, hidden)) => *hidden,
+            None => !self
+                .hidden
+                .contains(&(viewer.to_owned(), subject.to_owned())),
+        }
+    }
+
+    /// Takes back what `viewer` was sent of `subject`: the team entry and the scores.
+    fn take_back(&self, viewer: &str, subject: &str, out: &mut Vec<Action>) {
+        let (v, s) = (&self.seats[viewer], &self.seats[subject]);
+        if let Some(team) = &s.team {
+            out.push(Action::TeamLeave {
+                viewer: viewer.to_owned(),
+                team: team.clone(),
+                member: s.facts.name.clone(),
+            });
+        }
+        let scored = (v.tab_shown && s.tab_score.is_some())
+            || (v.below_shown.is_some() && s.below_score.is_some());
+        if scored {
+            out.push(Action::ForgetScores {
+                viewer: viewer.to_owned(),
+                entity: s.facts.name.clone(),
+            });
+        }
+    }
+
+    /// Sends `viewer` the team entry and scores of `subject` as they are now.
+    fn send_again(&self, config: &Config, viewer: &str, subject: &str, out: &mut Vec<Action>) {
+        let (v, s) = (&self.seats[viewer], &self.seats[subject]);
+        if let Some(team) = &s.team {
+            out.push(Action::TeamJoin {
+                viewer: viewer.to_owned(),
+                team: team.clone(),
+                member: s.facts.name.clone(),
+            });
+        }
+        if let (Some(score), Some(value), true) = (&config.tab_score, s.tab_score, v.tab_shown) {
+            out.push(Action::Score {
+                viewer: viewer.to_owned(),
+                objective: TAB_OBJECTIVE,
+                entity: s.facts.name.clone(),
+                value,
+                shown: shown(score, config.lang_for(v.facts.lang), value),
+            });
+        }
+        if let (Some(below), Some(value), Some(lang)) =
+            (&config.below_name, s.below_score, v.below_shown)
+        {
+            out.push(Action::Score {
+                viewer: viewer.to_owned(),
+                objective: BELOW_OBJECTIVE,
+                entity: s.facts.name.clone(),
+                value,
+                shown: shown(&below.score, lang, value),
+            });
+        }
+    }
+
+    /// Drops what the plan would send a viewer of a player hidden from it: team entries and
+    /// scores carry the player's name, and the viewer must learn nothing of him.
+    fn drop_hidden(&self, out: &mut Vec<Action>) {
+        if self.hidden.is_empty() {
+            return;
+        }
+        let uuid_of: HashMap<&str, &str> = self
+            .seats
+            .iter()
+            .map(|(uuid, seat)| (seat.facts.name.as_str(), uuid.as_str()))
+            .collect();
+        let hidden = |viewer: &String, name: &String| {
+            uuid_of.get(name.as_str()).is_some_and(|subject| {
+                self.hidden
+                    .contains(&(viewer.clone(), (*subject).to_owned()))
+            })
+        };
+        out.retain(|action| match action {
+            Action::TeamJoin { viewer, member, .. } | Action::TeamLeave { viewer, member, .. } => {
+                !hidden(viewer, member)
+            }
+            Action::Score { viewer, entity, .. } | Action::ForgetScores { viewer, entity } => {
+                !hidden(viewer, entity)
+            }
+            _ => true,
+        });
+    }
+
+    /// Keeps a team off the board of a viewer who can see none of its members: he is not told
+    /// that it exists, gets it the moment he can see a member, and loses it with the last one.
+    /// Looks only at the viewers this plan sends a team action who have a hidden player or a
+    /// withheld team, so a plan without one costs nothing.
+    fn hide_teams(&mut self, out: &mut Vec<Action>) {
+        if self.hidden.is_empty() && self.withheld.is_empty() {
+            return;
+        }
+        let Self {
+            hidden,
+            withheld,
+            seats,
+            teams,
+            ..
+        } = self;
+        // Per such viewer: the teams with a member he can see, as they are after this plan.
+        let mut seen: BTreeMap<&str, HashSet<&str>> = BTreeMap::new();
+        let mut looked: HashSet<&str> = HashSet::new();
+        for action in out.iter() {
+            let (Action::TeamCreate { viewer, .. }
+            | Action::TeamRemove { viewer, .. }
+            | Action::TeamJoin { viewer, .. }
+            | Action::TeamLeave { viewer, .. }) = action
+            else {
+                continue;
+            };
+            let Some((viewer, _)) = seats.get_key_value(viewer) else {
+                continue;
+            };
+            if !looked.insert(viewer.as_str()) {
+                continue;
+            }
+            let unseen: HashSet<&str> = seconds_of(hidden, viewer).collect();
+            if unseen.is_empty() && seconds_of(withheld, viewer).next().is_none() {
+                continue;
+            }
+            let teams_seen = seats
+                .iter()
+                .filter(|(uuid, _)| !unseen.contains(uuid.as_str()))
+                .filter_map(|(_, seat)| seat.team.as_deref())
+                .collect();
+            seen.insert(viewer.as_str(), teams_seen);
+        }
+        if seen.is_empty() {
+            return;
+        }
+        let mut kept = Vec::with_capacity(out.len());
+        for action in out.drain(..) {
+            match &action {
+                Action::TeamCreate { viewer, team, .. } => {
+                    if let Some(teams_seen) = seen.get(viewer.as_str()) {
+                        let pair = (viewer.clone(), team.clone());
+                        if teams_seen.contains(team.as_str()) {
+                            withheld.remove(&pair);
+                        } else {
+                            withheld.insert(pair);
+                            continue;
+                        }
+                    }
+                }
+                Action::TeamRemove { viewer, team } => {
+                    if seen.contains_key(viewer.as_str())
+                        && withheld.remove(&(viewer.clone(), team.clone()))
+                    {
+                        continue;
+                    }
+                }
+                Action::TeamJoin { viewer, team, .. } => {
+                    // The first member this viewer can see: the team comes with him.
+                    if seen.contains_key(viewer.as_str())
+                        && withheld.remove(&(viewer.clone(), team.clone()))
+                        && let Some(entry) = teams.get(team)
+                    {
+                        kept.push(Action::TeamCreate {
+                            viewer: viewer.clone(),
+                            team: team.clone(),
+                            style: entry.style.clone(),
+                        });
+                    }
+                }
+                Action::TeamLeave { viewer, team, .. }
+                    if seen.contains_key(viewer.as_str())
+                        && withheld.contains(&(viewer.clone(), team.clone())) =>
+                {
+                    continue;
+                }
+                _ => {}
+            }
+            kept.push(action);
+        }
+        // A team whose last member this viewer could see left it, or was hidden from him.
+        for (viewer, teams_seen) in &seen {
+            for team in teams.keys() {
+                if !teams_seen.contains(team.as_str())
+                    && withheld.insert(((*viewer).to_owned(), team.clone()))
+                {
+                    kept.push(Action::TeamRemove {
+                        viewer: (*viewer).to_owned(),
+                        team: team.clone(),
+                    });
+                }
+            }
+        }
+        withheld.retain(|(_, team)| teams.contains_key(team));
+        *out = kept;
     }
 
     #[must_use]
@@ -484,6 +758,10 @@ impl Planner {
             if other.new || other.facts.edition != Edition::Java {
                 continue;
             }
+            // That viewer's board holds nothing of him.
+            if !self.holds(viewer, uuid) {
+                continue;
+            }
             if let Some(team) = &team {
                 self.pending.push(Action::TeamLeave {
                     viewer: viewer.clone(),
@@ -498,6 +776,11 @@ impl Planner {
                 });
             }
         }
+        // The engine keeps a hide over a rejoin; the next join asks again.
+        self.hidden.retain(|(v, s)| v != uuid && s != uuid);
+        self.sight_changes
+            .retain(|(v, s, _)| v != uuid && s != uuid);
+        self.withheld.retain(|(v, _)| v != uuid);
     }
 
     fn update(&mut self, uuid: &str, change: impl FnOnce(&mut Facts) -> Deps) {
@@ -770,6 +1053,41 @@ impl Planner {
     /// The actions for everything that changed since the last plan.
     #[must_use]
     pub fn plan(&mut self) -> Vec<Action> {
+        // Visibility: what each pair was before this plan and is now. Pairs with a player who is
+        // not set up yet get their entries from the plan itself, through the filter.
+        let mut sight: BTreeMap<(String, String), (bool, bool)> = BTreeMap::new();
+        for (viewer, subject, hidden) in std::mem::take(&mut self.sight_changes) {
+            sight
+                .entry((viewer, subject))
+                .and_modify(|(_, now)| *now = hidden)
+                .or_insert((!hidden, hidden));
+        }
+        let mut before = Vec::new();
+        let mut shows = Vec::new();
+        for ((viewer, subject), (was, now)) in sight {
+            if was == now || !self.settled(&viewer, &subject) {
+                continue;
+            }
+            if now {
+                self.take_back(&viewer, &subject, &mut before);
+            } else {
+                shows.push((viewer, subject));
+            }
+        }
+        let mut out = self.plan_changes();
+        self.drop_hidden(&mut out);
+        let config = Arc::clone(&self.config);
+        for (viewer, subject) in &shows {
+            if self.seats.contains_key(viewer) && self.seats.contains_key(subject) {
+                self.send_again(&config, viewer, subject, &mut out);
+            }
+        }
+        before.append(&mut out);
+        self.hide_teams(&mut before);
+        before
+    }
+
+    fn plan_changes(&mut self) -> Vec<Action> {
         let mut out = std::mem::take(&mut self.pending);
         let reconfigured = std::mem::take(&mut self.reconfigured);
         let changed = std::mem::take(&mut self.changed);
@@ -1155,6 +1473,7 @@ impl Planner {
         reconfigured: bool,
         out: &mut Vec<Action>,
     ) {
+        let hidden = &self.hidden;
         for (uuid, seat) in &mut self.seats {
             let layout = config.layout_for(&seat.facts.world, &seat.facts.rank.group);
             let relayout = seat.new
@@ -1168,6 +1487,8 @@ impl Planner {
             if !due {
                 continue;
             }
+            // The players this viewer can see, himself included (as `/list` counts for him).
+            let online = online.saturating_sub(Self::hidden_from(hidden, uuid));
             let values = Values {
                 uuid,
                 facts: &seat.facts,
@@ -1323,6 +1644,10 @@ impl Planner {
             }
             if seat.facts.edition == Edition::Java {
                 for team in self.teams.keys() {
+                    // A team this viewer never got is not named to him now either.
+                    if self.withheld.contains(&(uuid.clone(), team.clone())) {
+                        continue;
+                    }
                     out.push(Action::TeamRemove {
                         viewer: uuid.clone(),
                         team: team.clone(),

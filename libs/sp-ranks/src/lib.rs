@@ -1,4 +1,6 @@
-//! Ranks from perms-lite over `ipc`: contract `ranks/1` (both plugins test the same bytes).
+//! Ranks from perms-lite over `ipc`: contract `ranks/1` (the same text in perms-lite's README
+//! and its `ipc` module; both sides test the same bytes). The one reader of it: Tab and Scoreboard,
+//! list-lite and join-lite all use this crate.
 //!
 //! UTF-8 text, fields separated by TAB, records by LF:
 //!
@@ -10,9 +12,11 @@
 //!   player whose rank changed; the watcher answers with nothing.
 //! - `<rev>` grows with every change and starts somewhere new at each perms-lite load, so a
 //!   watcher that sees a `rev` it was not told about reads every rank again.
-//! - A plain UUID (no `ranks/1`) still answers the bare prefix, for older callers.
+//! - A plain UUID (no `ranks/1`) still answers the bare prefix, for chat-lite.
 //!
 //! Nothing here calls the host except [`get`] and [`watch`], which hold no lock.
+
+#![forbid(unsafe_code)]
 
 /// The plugin that owns the ranks.
 pub const PERMS_PLUGIN: &str = "perms-lite";

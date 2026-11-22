@@ -1,4 +1,4 @@
-//! Tab and Scoreboard: the tab list (names, order, header, footer and a score),
+//! Tab and Scoreboard (was board-lite): the tab list (names, order, header, footer and a score),
 //! the nametags, a sidebar and a score below names, with ranks from perms-lite, images,
 //! placeholders and values from other plugins.
 //!
@@ -22,11 +22,12 @@ pub mod contracts;
 pub mod engine;
 pub mod lang;
 pub mod placeholders;
-pub mod ranks;
+/// The rank reader, shared with the other scripts that show a rank (`libs/sp-ranks`).
+pub use sp_ranks as ranks;
 pub mod render;
 pub mod views;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use strawberry_plugin_api::{
@@ -36,7 +37,8 @@ use strawberry_plugin_api::{
     common::{ArgbColor, NamedColor, RgbColor},
     events::{
         EventData, EventHandler, FailureVerdict, HandlerOptions, HandlerPriority,
-        PlayerChangedWorldEvent, PlayerJoinEvent, PlayerLeaveEvent, PlayerLocaleChangeEvent,
+        PlayerChangedWorldEvent, PlayerHideEntityEvent, PlayerJoinEvent, PlayerLeaveEvent,
+        PlayerLocaleChangeEvent, PlayerShowEntityEvent,
     },
     logging::{LogLevel, log},
     permission::{Permission, PermissionDefault, PermissionLevel},
@@ -93,10 +95,31 @@ enum Note {
 struct Inbox {
     notes: Vec<Note>,
     overflow: bool,
+    /// (viewer, entity id) to whether another plugin hides that entity from the viewer now: the
+    /// last word per pair since the last cycle. Kept apart from `notes` and never dropped when
+    /// those overflow: a lost hide would leave a hidden player on the viewer's board. At most one
+    /// entry per pair of players online.
+    sight: BTreeMap<(String, i32), bool>,
+}
+
+impl Inbox {
+    fn push(&mut self, note: Note) {
+        if self.notes.len() < MAX_NOTES {
+            self.notes.push(note);
+        } else {
+            self.overflow = true;
+        }
+    }
+
+    fn see(&mut self, viewer: String, entity: i32, hidden: bool) {
+        self.sight.insert((viewer, entity), hidden);
+    }
 }
 
 struct Handles {
     player: Player,
+    /// The player's entity id, which visibility events and `can-see-entity` use.
+    entity: Option<i32>,
     board: Option<Scoreboard>,
     bedrock: Option<BedrockScoreboard>,
 }
@@ -143,6 +166,9 @@ struct Shared {
     /// Plugins already told about in the log, for what would otherwise repeat.
     warned: Mutex<HashSet<String>>,
     messages: Mutex<Messages>,
+    /// Entity id to UUID of the players the task knows: hide events of other entities are not
+    /// this plugin's, and are dropped in the handler.
+    entities: Mutex<HashMap<i32, String>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -151,11 +177,14 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl Shared {
     fn note(&self, note: Note) {
-        let mut inbox = lock(&self.inbox);
-        if inbox.notes.len() < MAX_NOTES {
-            inbox.notes.push(note);
-        } else {
-            inbox.overflow = true;
+        lock(&self.inbox).push(note);
+    }
+
+    /// Another plugin hid (`true`) or showed a player's entity from this viewer. Entities that
+    /// are not a player known here (a mob) are not this plugin's and are dropped at once.
+    fn sight(&self, viewer: &Player, entity: i32, hidden: bool) {
+        if lock(&self.entities).contains_key(&entity) {
+            lock(&self.inbox).see(viewer.get_id().to_string(), entity, hidden);
         }
     }
 
@@ -278,6 +307,7 @@ fn add_player(shared: &Shared, rt: &mut Runtime, player: Player, joined: &mut Ve
     };
     let face = face_of(&player, &uuid, &rt.planner);
     let view = lock(&shared.views).view(&uuid);
+    let entity = i32::try_from(player.as_entity().get_id()).ok();
     rt.planner.join(
         &uuid,
         Facts {
@@ -291,15 +321,86 @@ fn add_player(shared: &Shared, rt: &mut Runtime, player: Player, joined: &mut Ve
         face,
         view,
     );
-    rt.handles.insert(
+    if let Some(entity) = entity {
+        lock(&shared.entities).insert(entity, uuid.clone());
+    }
+    let old = rt.handles.insert(
         uuid.clone(),
         Handles {
             player,
+            entity,
             board,
             bedrock,
         },
     );
+    if let Some(old_entity) = old.and_then(|h| h.entity)
+        && Some(old_entity) != entity
+    {
+        lock(&shared.entities).remove(&old_entity);
+    }
     joined.push(uuid);
+}
+
+/// A player left.
+fn drop_player(shared: &Shared, rt: &mut Runtime, uuid: &str) {
+    rt.planner.leave(uuid);
+    if let Some(entity) = rt.handles.remove(uuid).and_then(|h| h.entity) {
+        lock(&shared.entities).remove(&entity);
+    }
+}
+
+/// Which pairs of `joined` and the others hide one from the other: another plugin may have hidden
+/// a player before this plugin saw the join, or keep a hide across a rejoin. One call per pair
+/// and direction, only for players who just joined.
+fn check_sight(rt: &mut Runtime, joined: &[String]) {
+    let fresh: HashSet<&String> = joined.iter().collect();
+    let mut hidden = Vec::new();
+    for uuid in joined {
+        let Some(new) = rt.handles.get(uuid) else {
+            continue;
+        };
+        for (other, handles) in &rt.handles {
+            // A pair of two new players is looked at once, from the smaller UUID.
+            if other == uuid || (fresh.contains(other) && other < uuid) {
+                continue;
+            }
+            if let Some(entity) = new.entity
+                && !handles.player.can_see_entity(entity)
+            {
+                hidden.push((other.clone(), uuid.clone()));
+            }
+            if let Some(entity) = handles.entity
+                && !new.player.can_see_entity(entity)
+            {
+                hidden.push((uuid.clone(), other.clone()));
+            }
+        }
+    }
+    for (viewer, subject) in hidden {
+        rt.planner.set_hidden(&viewer, &subject, true);
+    }
+}
+
+/// The pairs hidden now that are visible again: a hide also ends without an event (the plugin
+/// that hid is unloaded). One call per hidden pair, at the slow check.
+fn recheck_sight(rt: &mut Runtime) {
+    let seen: Vec<(String, String)> = rt
+        .planner
+        .hidden_pairs()
+        .filter(|(viewer, subject)| {
+            match (
+                rt.handles.get(viewer),
+                rt.handles.get(subject).and_then(|h| h.entity),
+            ) {
+                (Some(viewer), Some(entity)) => viewer.player.can_see_entity(entity),
+                _ => true,
+            }
+        })
+        .cloned()
+        .collect();
+    for (viewer, subject) in seen {
+        rt.planner.set_hidden(&viewer, &subject, false);
+    }
 }
 
 /// Compares the online players with the planner's and fixes any difference.
@@ -319,8 +420,7 @@ fn reconcile(shared: &Shared, rt: &mut Runtime, server: &Server, joined: &mut Ve
         .cloned()
         .collect();
     for uuid in gone {
-        rt.planner.leave(&uuid);
-        rt.handles.remove(&uuid);
+        drop_player(shared, rt, &uuid);
     }
     rt.planner.set_max_players(server.get_max_players());
     rt.planner.sweep_values(&online);
@@ -401,10 +501,7 @@ fn run_notes(
                     None => {}
                 }
             }
-            Note::Leave(uuid) => {
-                rt.planner.leave(&uuid);
-                rt.handles.remove(&uuid);
-            }
+            Note::Leave(uuid) => drop_player(shared, rt, &uuid),
             Note::World(uuid, world) => rt.planner.set_world(&uuid, &world),
             Note::Locale(uuid, locale) => rt.planner.set_lang(&uuid, lang::index(&locale)),
             Note::Ranks(rev, list) => {
@@ -446,9 +543,21 @@ fn run_cycle(shared: &Shared, server: &Server) {
 
     if check {
         reconcile(shared, &mut rt, server, &mut joined);
+        recheck_sight(&mut rt);
         shared.save_views();
     }
     let retry = run_notes(shared, &mut rt, server, notes, &mut joined);
+    // After the notes, so a player who left or joined in this cycle is already known as such.
+    let sight = std::mem::take(&mut lock(&shared.inbox).sight);
+    for ((viewer, entity), hidden) in sight {
+        let subject = lock(&shared.entities).get(&entity).cloned();
+        if let Some(subject) = subject {
+            rt.planner.set_hidden(&viewer, &subject, hidden);
+        }
+    }
+    if !joined.is_empty() {
+        check_sight(&mut rt, &joined);
+    }
 
     // perms-lite: the ranks of new players, and every rank again when perms-lite changed
     // without telling (it was reloaded).
@@ -917,6 +1026,32 @@ impl EventHandler<PlayerJoinEvent> for OnJoin {
     }
 }
 
+/// Another plugin hides a player from a viewer (vanish): the viewer gets no team entry or score
+/// of him from this plugin, and his `{online}` leaves him out.
+struct OnHide(Arc<Shared>);
+impl EventHandler<PlayerHideEntityEvent> for OnHide {
+    fn handle(
+        &self,
+        _server: Server,
+        event: EventData<PlayerHideEntityEvent>,
+    ) -> EventData<PlayerHideEntityEvent> {
+        self.0.sight(&event.player, event.entity_id, true);
+        event
+    }
+}
+
+struct OnShow(Arc<Shared>);
+impl EventHandler<PlayerShowEntityEvent> for OnShow {
+    fn handle(
+        &self,
+        _server: Server,
+        event: EventData<PlayerShowEntityEvent>,
+    ) -> EventData<PlayerShowEntityEvent> {
+        self.0.sight(&event.player, event.entity_id, false);
+        event
+    }
+}
+
 struct OnLeave(Arc<Shared>);
 impl EventHandler<PlayerLeaveEvent> for OnLeave {
     fn handle(
@@ -1237,6 +1372,7 @@ impl Plugin for TabAndScoreboard {
                 key_limit: Mutex::new(KeyLimit::default()),
                 warned: Mutex::new(HashSet::new()),
                 messages: Mutex::new(Messages::default()),
+                entities: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -1246,8 +1382,9 @@ impl Plugin for TabAndScoreboard {
             name: "tab-and-scoreboard".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             authors: vec!["Strawberry Interactive LLC".into()],
-            description: "Tab list, nametags and sidebar with ranks, images and placeholders."
-                .into(),
+            description:
+                "Tab list, nametags and sidebar with perms-lite ranks, images and placeholders."
+                    .into(),
             dependencies: vec![],
             permissions: vec![
                 permissions::FS_READ_DATA.into(),
@@ -1324,6 +1461,14 @@ impl Plugin for TabAndScoreboard {
             OnLocale(Arc::clone(&self.shared)),
             observer(),
         )?;
+        context.register_event_handler_with_options::<PlayerHideEntityEvent, _>(
+            OnHide(Arc::clone(&self.shared)),
+            observer(),
+        )?;
+        context.register_event_handler_with_options::<PlayerShowEntityEvent, _>(
+            OnShow(Arc::clone(&self.shared)),
+            observer(),
+        )?;
 
         // The period is fixed at load: a reload with another refresh-seconds takes effect at the
         // next server start (the task's own cycle count follows the new value at once).
@@ -1364,3 +1509,28 @@ impl Plugin for TabAndScoreboard {
 }
 
 strawberry_plugin_api::register_plugin!(TabAndScoreboard);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hide_is_kept_when_the_notes_overflow_and_the_last_word_counts() {
+        let mut inbox = Inbox::default();
+        for _ in 0..MAX_NOTES + 3 {
+            inbox.push(Note::View("someone".into()));
+        }
+        assert!(inbox.overflow);
+        assert_eq!(inbox.notes.len(), MAX_NOTES);
+        inbox.see("viewer".into(), 7, true);
+        inbox.see("viewer".into(), 8, true);
+        inbox.see("viewer".into(), 8, false);
+        assert_eq!(
+            inbox.sight,
+            BTreeMap::from([
+                (("viewer".to_owned(), 7), true),
+                (("viewer".to_owned(), 8), false)
+            ])
+        );
+    }
+}

@@ -935,3 +935,440 @@ fn an_idle_plan_is_empty_after_every_kind_of_setup() {
     assert!(p.plan().is_empty());
     assert!(p.plan().is_empty());
 }
+
+// Per-player visibility: another plugin hides a player from one viewer (vanish).
+
+fn footer_of(actions: &[Action], viewer: &str) -> Option<String> {
+    actions.iter().find_map(|a| match a {
+        Action::HeaderFooter {
+            viewer: v, footer, ..
+        } if v == viewer => Some(text(footer)),
+        _ => None,
+    })
+}
+
+fn about(actions: &[Action], viewer: &str, name: &str) -> Vec<Action> {
+    actions
+        .iter()
+        .filter(|a| match a {
+            Action::TeamJoin {
+                viewer: v, member, ..
+            }
+            | Action::TeamLeave {
+                viewer: v, member, ..
+            } => v == viewer && member == name,
+            Action::Score {
+                viewer: v, entity, ..
+            }
+            | Action::ForgetScores { viewer: v, entity } => v == viewer && entity == name,
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn a_hidden_player_is_counted_out_of_that_viewers_online_only() {
+    let mut p = builtin();
+    p.set_max_players(20);
+    join(&mut p, A, facts("Alex", Edition::Java));
+    join(&mut p, B, facts("Bo", Edition::Java));
+    let _ = p.plan();
+    p.set_hidden(A, B, true);
+    let actions = p.plan();
+    assert!(
+        footer_of(&actions, A).is_some_and(|f| f.contains("1/20")),
+        "{actions:?}"
+    );
+    assert!(
+        footer_of(&actions, B).is_none(),
+        "Bo's count did not change"
+    );
+    p.set_hidden(A, B, false);
+    let actions = p.plan();
+    assert!(footer_of(&actions, A).is_some_and(|f| f.contains("2/20")));
+    // The same state again changes nothing.
+    p.set_hidden(A, B, false);
+    assert!(p.plan().is_empty());
+}
+
+#[test]
+fn a_hidden_players_team_entry_and_scores_never_reach_that_viewer() {
+    let mut p = planner("[tab-score]\nvalue = {ping}\n[below-name]\ntitle = x\nvalue = {ping}\n");
+    join(&mut p, A, facts("Alex", Edition::Java));
+    let _ = p.plan();
+    // Bo joins hidden from Alex (a vanish plugin hides him in its join handler).
+    join(&mut p, B, facts("Bo", Edition::Java));
+    p.set_hidden(A, B, true);
+    let actions = p.plan();
+    assert!(
+        about(&actions, A, "Bo").is_empty(),
+        "{:?}",
+        about(&actions, A, "Bo")
+    );
+    // Bo himself still gets Alex's entry and scores.
+    assert!(team_of(&actions, B, "Alex").is_some());
+    assert_eq!(score_of(&actions, B, TAB_OBJECTIVE, "Alex"), Some(0));
+    // A new value of Bo still goes to nobody who cannot see him.
+    p.set_ping(B, 40);
+    let actions = p.plan();
+    assert!(about(&actions, A, "Bo").is_empty());
+}
+
+#[test]
+fn hiding_takes_the_entry_back_and_showing_sends_it_again() {
+    let mut p = planner("[tab-score]\nvalue = {ping}\n");
+    join(&mut p, A, facts("Alex", Edition::Java));
+    join(&mut p, B, facts("Bo", Edition::Java));
+    let first = p.plan();
+    let team = team_of(&first, A, "Bo").expect("Bo in a team on Alex's board");
+    p.set_ping(B, 30);
+    let _ = p.plan();
+
+    p.set_hidden(A, B, true);
+    let hidden = p.plan();
+    assert!(hidden.contains(&Action::TeamLeave {
+        viewer: A.into(),
+        team: team.clone(),
+        member: "Bo".into(),
+    }));
+    assert!(hidden.contains(&Action::ForgetScores {
+        viewer: A.into(),
+        entity: "Bo".into(),
+    }));
+    assert!(
+        about(&hidden, B, "Alex").is_empty(),
+        "Alex is not hidden from Bo"
+    );
+
+    p.set_hidden(A, B, false);
+    let shown = p.plan();
+    assert!(shown.contains(&Action::TeamJoin {
+        viewer: A.into(),
+        team,
+        member: "Bo".into(),
+    }));
+    assert_eq!(score_of(&shown, A, TAB_OBJECTIVE, "Bo"), Some(30));
+}
+
+#[test]
+fn a_hidden_player_who_leaves_sends_that_viewer_nothing_and_the_pair_goes() {
+    let mut p = planner("[tab-score]\nvalue = {ping}\n");
+    join(&mut p, A, facts("Alex", Edition::Java));
+    join(&mut p, B, facts("Bo", Edition::Java));
+    let _ = p.plan();
+    p.set_hidden(A, B, true);
+    let _ = p.plan();
+    p.leave(B);
+    let actions = p.plan();
+    assert!(about(&actions, A, "Bo").is_empty(), "{actions:?}");
+    assert_eq!(p.hidden_pairs().count(), 0);
+    // A player cannot hide himself, and unknown players are ignored.
+    p.set_hidden(A, A, true);
+    p.set_hidden(A, C, true);
+    assert_eq!(p.hidden_pairs().count(), 0);
+}
+
+/// The team itself, as `viewer` was told: created or removed.
+fn team_news(actions: &[Action], viewer: &str, team: &str) -> Vec<Action> {
+    actions
+        .iter()
+        .filter(|a| match a {
+            Action::TeamCreate {
+                viewer: v, team: t, ..
+            }
+            | Action::TeamRemove { viewer: v, team: t } => v == viewer && t == team,
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+fn at(actions: &[Action], wanted: impl Fn(&Action) -> bool) -> Option<usize> {
+    actions.iter().position(wanted)
+}
+
+#[test]
+fn a_team_of_hidden_players_only_is_not_on_that_viewers_board() {
+    let mut p = builtin();
+    join(&mut p, A, facts("Alex", Edition::Java));
+    let _ = p.plan();
+    // Bo joins hidden from Alex with a look nobody else has: the team's name and prefix alone
+    // would tell Alex that a VIP is online.
+    join(&mut p, B, facts("Bo", Edition::Java));
+    p.set_rank(B, vip());
+    p.set_hidden(A, B, true);
+    let actions = p.plan();
+    let vip_team = team_of(&actions, B, "Bo").expect("Bo is on his own board");
+    assert!(
+        team_news(&actions, A, &vip_team).is_empty(),
+        "{:?}",
+        team_news(&actions, A, &vip_team)
+    );
+    assert_eq!(team_news(&actions, B, &vip_team).len(), 1);
+
+    // Shown: the team first, then Bo in it.
+    p.set_hidden(A, B, false);
+    let shown = p.plan();
+    let created = at(&shown, |a| {
+        matches!(a, Action::TeamCreate { viewer, team, style }
+            if viewer == A && *team == vip_team && text(&style.prefix) == "&6[VIP]&r ")
+    });
+    let joined = at(&shown, |a| {
+        *a == Action::TeamJoin {
+            viewer: A.into(),
+            team: vip_team.clone(),
+            member: "Bo".into(),
+        }
+    });
+    assert!(
+        matches!((created, joined), (Some(c), Some(j)) if c < j),
+        "{shown:?}"
+    );
+
+    // Hidden again: Bo leaves the team, then the team goes, on Alex's board only.
+    p.set_hidden(A, B, true);
+    let hidden = p.plan();
+    let left = at(&hidden, |a| {
+        *a == Action::TeamLeave {
+            viewer: A.into(),
+            team: vip_team.clone(),
+            member: "Bo".into(),
+        }
+    });
+    let removed = at(&hidden, |a| {
+        *a == Action::TeamRemove {
+            viewer: A.into(),
+            team: vip_team.clone(),
+        }
+    });
+    assert!(
+        matches!((left, removed), (Some(l), Some(r)) if l < r),
+        "{hidden:?}"
+    );
+    assert!(team_news(&hidden, B, &vip_team).is_empty());
+
+    // A viewer who joins now, with Bo hidden from him too, never gets the team.
+    join(&mut p, C, facts("Cy", Edition::Java));
+    p.set_hidden(C, B, true);
+    let third = p.plan();
+    assert!(team_news(&third, C, &vip_team).is_empty(), "{third:?}");
+    assert!(about(&third, C, "Bo").is_empty());
+
+    // The plugin stops: nobody is told to remove a team he never had.
+    let stop = p.cleanup();
+    assert!(team_news(&stop, A, &vip_team).is_empty());
+    assert!(team_news(&stop, C, &vip_team).is_empty());
+    assert_eq!(team_news(&stop, B, &vip_team).len(), 1);
+
+    // Bo leaves: the team ends, and Alex and Cy hear nothing of it.
+    p.leave(B);
+    let gone = p.plan();
+    assert!(team_news(&gone, A, &vip_team).is_empty(), "{gone:?}");
+    assert!(team_news(&gone, C, &vip_team).is_empty());
+    assert!(p.withheld.is_empty());
+}
+
+#[test]
+fn a_team_stays_on_the_board_while_the_viewer_sees_one_member() {
+    let mut p = builtin();
+    join(&mut p, A, facts("Alex", Edition::Java));
+    join(&mut p, B, facts("Bo", Edition::Java));
+    join(&mut p, C, facts("Cy", Edition::Java));
+    p.set_rank(B, vip());
+    p.set_rank(C, vip());
+    let first = p.plan();
+    let vip_team = team_of(&first, A, "Bo").expect("joined");
+    assert_eq!(team_of(&first, A, "Cy").as_ref(), Some(&vip_team));
+
+    // Bo is hidden from Alex; Cy is still there, so the team stays.
+    p.set_hidden(A, B, true);
+    let hidden = p.plan();
+    assert!(team_news(&hidden, A, &vip_team).is_empty(), "{hidden:?}");
+
+    // Cy leaves: only the hidden Bo is left in it, so it goes from Alex's board, not from Bo's.
+    p.leave(C);
+    let left = p.plan();
+    assert_eq!(
+        team_news(&left, A, &vip_team),
+        vec![Action::TeamRemove {
+            viewer: A.into(),
+            team: vip_team.clone(),
+        }],
+        "{left:?}"
+    );
+    assert!(team_news(&left, B, &vip_team).is_empty());
+
+    // Cy is back: Alex gets the team again, before Cy's entry.
+    join(&mut p, C, facts("Cy", Edition::Java));
+    p.set_rank(C, vip());
+    let back = p.plan();
+    let created = at(
+        &back,
+        |a| matches!(a, Action::TeamCreate { viewer, team, .. } if viewer == A && *team == vip_team),
+    );
+    let joined = at(&back, |a| {
+        *a == Action::TeamJoin {
+            viewer: A.into(),
+            team: vip_team.clone(),
+            member: "Cy".into(),
+        }
+    });
+    assert!(
+        matches!((created, joined), (Some(c), Some(j)) if c < j),
+        "{back:?}"
+    );
+    assert!(about(&back, A, "Bo").is_empty());
+    // Nothing more to say afterwards.
+    assert!(p.plan().is_empty());
+}
+
+/// What a client holds of the teams, built from the actions it was sent.
+#[derive(Default)]
+struct Board {
+    teams: BTreeSet<String>,
+    /// Member name to team.
+    members: BTreeMap<String, String>,
+    /// The names with a score in the tab list, and the score.
+    scores: BTreeMap<String, i32>,
+}
+
+/// Applies the team actions to each viewer's board, and fails on one a client would not accept
+/// (a team made twice, or an action on a team it does not hold).
+fn replay(boards: &mut BTreeMap<String, Board>, actions: &[Action]) {
+    for action in actions {
+        match action {
+            Action::ClearBoard { viewer } => {
+                boards.insert(viewer.clone(), Board::default());
+            }
+            Action::TeamCreate { viewer, team, .. } => {
+                let board = boards.entry(viewer.clone()).or_default();
+                assert!(board.teams.insert(team.clone()), "made twice: {action:?}");
+            }
+            Action::TeamRemove { viewer, team } => {
+                let board = boards.entry(viewer.clone()).or_default();
+                assert!(board.teams.remove(team), "not held: {action:?}");
+                board.members.retain(|_, t| t != team);
+            }
+            Action::TeamJoin {
+                viewer,
+                team,
+                member,
+            } => {
+                let board = boards.entry(viewer.clone()).or_default();
+                assert!(board.teams.contains(team), "not held: {action:?}");
+                board.members.insert(member.clone(), team.clone());
+            }
+            Action::TeamLeave {
+                viewer,
+                team,
+                member,
+            } => {
+                let board = boards.entry(viewer.clone()).or_default();
+                assert!(board.teams.contains(team), "not held: {action:?}");
+                if board.members.get(member) == Some(team) {
+                    board.members.remove(member);
+                }
+            }
+            Action::Score {
+                viewer,
+                objective,
+                entity,
+                value,
+                ..
+            } if *objective == TAB_OBJECTIVE => {
+                let board = boards.entry(viewer.clone()).or_default();
+                board.scores.insert(entity.clone(), *value);
+            }
+            Action::ForgetScores { viewer, entity } => {
+                let board = boards.entry(viewer.clone()).or_default();
+                board.scores.remove(entity);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Many joins, leaves, rank changes, hides and shows in a fixed pseudo-random order: after every
+/// plan each viewer's board holds exactly the players he can see, in their teams and with their
+/// scores, and exactly the teams with such a player. Nothing of a hidden player, not even his
+/// team, is on it.
+#[test]
+fn every_board_holds_exactly_what_its_viewer_can_see() {
+    let uuids: Vec<String> = (0..6)
+        .map(|i| format!("00000000-0000-0000-0000-00000000000{i}"))
+        .collect();
+    let ranks = [
+        Rank::default(),
+        vip(),
+        Rank {
+            group: "staff".into(),
+            weight: 90,
+            prefix: "Staff".into(),
+            suffix: String::new(),
+        },
+    ];
+    let mut p = planner("[tab-score]\nvalue = {ping}\n");
+    let mut boards: BTreeMap<String, Board> = BTreeMap::new();
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = |bound: usize| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        usize::try_from(state >> 33).expect("fits") % bound
+    };
+    for step in 0..4000 {
+        let who = &uuids[next(uuids.len())];
+        let other = &uuids[next(uuids.len())];
+        match next(11) {
+            0 | 1 => {
+                if !p.seats.contains_key(who) {
+                    let name = format!("P{}", &who[who.len() - 1..]);
+                    join(&mut p, who, facts(&name, Edition::Java));
+                }
+            }
+            2 => {
+                if p.seats.contains_key(who) {
+                    // His board stays for what was already planned for him; the next join
+                    // starts it again with `ClearBoard`.
+                    p.leave(who);
+                }
+            }
+            3 | 4 => p.set_rank(who, ranks[next(ranks.len())].clone()),
+            5..=7 => p.set_hidden(who, other, true),
+            8 | 9 => p.set_hidden(who, other, false),
+            _ => p.set_ping(who, u32::try_from(next(300)).expect("fits")),
+        }
+        // Several changes often go into one plan.
+        if next(2) == 0 {
+            continue;
+        }
+        let actions = p.plan();
+        replay(&mut boards, &actions);
+        for viewer in p.seats.keys() {
+            let visible: Vec<&Seat> = p
+                .seats
+                .iter()
+                .filter(|(uuid, _)| !p.hidden.contains(&(viewer.clone(), (*uuid).clone())))
+                .map(|(_, seat)| seat)
+                .collect();
+            let members: BTreeMap<String, String> = visible
+                .iter()
+                .filter_map(|s| s.team.clone().map(|t| (s.facts.name.clone(), t)))
+                .collect();
+            let teams: BTreeSet<String> = members.values().cloned().collect();
+            let board = boards.get(viewer).expect("set up at the join");
+            assert_eq!(board.members, members, "step {step}, viewer {viewer}");
+            assert_eq!(board.teams, teams, "step {step}, viewer {viewer}");
+            let scores: BTreeMap<String, i32> = visible
+                .iter()
+                .filter_map(|s| s.tab_score.map(|score| (s.facts.name.clone(), score)))
+                .collect();
+            assert_eq!(board.scores, scores, "step {step}, viewer {viewer}");
+        }
+        assert!(
+            p.plan().is_empty(),
+            "step {step}: an idle plan sends nothing"
+        );
+    }
+}

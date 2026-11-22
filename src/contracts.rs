@@ -1,8 +1,12 @@
 //! What other plugins ask this plugin over `ipc`. UTF-8 text, fields separated by TAB, records by
-//! LF, in the style of `ranks/1`. The sender's name comes from the server.
+//! LF (a last LF is allowed), in the style of `ranks/1`. The sender's name comes from the
+//! server.
 //!
 //! - `placeholders/1`, then lines: `set<TAB><uuid or *><TAB><key><TAB><value>` (literal text),
-//!   `icon<TAB><uuid or *><TAB><key><TAB><image id>`, `clear<TAB><uuid or *>[<TAB><key>]`. Answer
+//!   `icon<TAB><uuid or *><TAB><key><TAB><image id>`,
+//!   `glyphs<TAB><uuid or *><TAB><key><TAB><font><TAB><text>` (characters of a font of the server's
+//!   own pack, never a platform font; drawn only with `icons = pack-required`),
+//!   `clear<TAB><uuid or *>[<TAB><key>]`. Answer
 //!   `placeholders/1<TAB>ok`. `clear<TAB>*` removes everything the sender ever pushed.
 //! - `sidebar/1<TAB>get<TAB><uuid>`, `sidebar/1<TAB>set<TAB><uuid><TAB>on|off` (stored; nothing is
 //!   written to the player), `sidebar/1<TAB>suppress<TAB><uuid><TAB><reason><TAB>on|off` (hidden
@@ -67,6 +71,8 @@ pub fn parse(bytes: &[u8]) -> Result<Request, String> {
         return Err("message too long".to_owned());
     }
     let text = std::str::from_utf8(bytes).map_err(|_| "not UTF-8".to_owned())?;
+    // a last LF ends the last record, as user_interface reads the same contract
+    let text = text.strip_suffix('\n').unwrap_or(text);
     let (head, rest) = text.split_once('\n').unwrap_or((text, ""));
     if head == "placeholders/1" {
         return parse_values(rest).map(Request::Values);
@@ -151,6 +157,22 @@ fn parse_values(lines: &str) -> Result<Vec<Op>, String> {
                     target: target(who)?,
                     key: key(name)?,
                     value: Provided::Icon((*id).to_owned()),
+                }
+            }
+            ["glyphs", who, name, font, text] => {
+                let font = crate::config::font(font)
+                    .filter(|f| {
+                        let namespace = f.split(':').next().unwrap_or("");
+                        !crate::config::RESERVED_NAMESPACES.contains(&namespace)
+                    })
+                    .ok_or_else(|| "bad font".to_owned())?;
+                Op::Set {
+                    target: target(who)?,
+                    key: key(name)?,
+                    value: Provided::Glyphs {
+                        font,
+                        text: value_text(text)?,
+                    },
                 }
             }
             ["clear", who] => Op::Clear {
@@ -267,6 +289,53 @@ mod tests {
                 key: None,
             }
         );
+    }
+
+    #[test]
+    fn glyphs_name_their_font_and_platform_fonts_are_refused() {
+        let message =
+            format!("placeholders/1\nglyphs\t{ALEX}\tmap\tminimap:map\t\u{E120}\u{F0000}");
+        let Ok(Request::Values(ops)) = text(&message) else {
+            panic!("read");
+        };
+        assert_eq!(
+            ops[0],
+            Op::Set {
+                target: Target::Player(ALEX.into()),
+                key: "map".into(),
+                value: Provided::Glyphs {
+                    font: "minimap:map".into(),
+                    text: "\u{E120}\u{F0000}".into()
+                },
+            }
+        );
+        for bad in ["strawberry_core:badge", "Bad:Font", "", "a:b c"] {
+            let message = format!("placeholders/1\nglyphs\t*\tmap\t{bad}\tx");
+            assert!(text(&message).is_err(), "{bad}");
+        }
+        let long = "x".repeat(MAX_VALUE_CHARS + 1);
+        assert!(text(&format!("placeholders/1\nglyphs\t*\tmap\ta:b\t{long}")).is_err());
+    }
+
+    #[test]
+    fn a_message_ending_with_a_line_feed_is_read() {
+        // as the minimap sends its Tab map: every line ends with LF
+        let message = format!(
+            "placeholders/1\nglyphs\t{ALEX}\ttab\tminimap:map\t\u{F0000}\u{E400}\nclear\t{ALEX}\tx\n"
+        );
+        let Ok(Request::Values(ops)) = text(&message) else {
+            panic!("read");
+        };
+        assert_eq!(ops.len(), 2);
+        assert!(
+            matches!(&ops[0], Op::Set { value: Provided::Glyphs { font, .. }, .. } if font == "minimap:map")
+        );
+        assert_eq!(
+            text(&format!("sidebar/1\tget\t{ALEX}\n")),
+            Ok(Request::Get(Flag::Sidebar, ALEX.into()))
+        );
+        // one LF ends a record; an empty line is still refused
+        assert!(text(&format!("placeholders/1\nclear\t{ALEX}\n\n")).is_err());
     }
 
     #[test]

@@ -115,7 +115,7 @@ pub enum IconsMode {
     /// Never: glyph images show their fallback text.
     Text,
     /// The server owner says the server's resource pack that has the fonts is required, so
-    /// every Java player in the game has loaded it (the server disconnects those who did not).
+    /// every Java player in the game has loaded it (the engine disconnects those who did not).
     PackRequired,
 }
 
@@ -1111,7 +1111,7 @@ fn glyph(value: &str) -> Option<String> {
 }
 
 /// `namespace:path` as a resource location; a bare path is in `minecraft`.
-fn font(value: &str) -> Option<String> {
+pub(crate) fn font(value: &str) -> Option<String> {
     let (namespace, path) = value.split_once(':').unwrap_or(("minecraft", value));
     let ns_ok = !namespace.is_empty()
         && namespace
